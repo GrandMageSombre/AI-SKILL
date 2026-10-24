@@ -1,6 +1,6 @@
 ---
 name: km1-robot-arm
-description: 用 Python + pyserial 驱动松甲机器人 KM1 / Yeahbot / YHKPZAR 六轴机械臂（6 舵机，115200）。覆盖 KM1 的三款控制器——三款串口指令完全兼容，只有 DTR/RTS 配置不同。触发词：机械臂、KM1、Yeahbot、YHKPZAR、松甲、舵机控制、PWM、动作组、$DGS、$DGT、串口控制机械臂、机械臂不动、waiting for download、机械臂抓取。含协议速查、三款控制器差异、自动探测、动作序列与故障排查。
+description: 用 Python + pyserial 驱动松甲机器人 KM1 / Yeahbot / YHKPZAR 六轴机械臂（6 舵机，115200）。覆盖 KM1 三款控制器：ESP32 / Arduino / STM32——串口指令完全兼容，只有 dtr/rts 配置不同（ESP32=F/F、Arduino 不设置、STM32=T/F）。触发词：机械臂、KM1、Yeahbot、YHKPZAR、松甲、舵机控制、PWM、动作组、$DGS、$DGT、串口控制机械臂、机械臂不动、waiting for download、机械臂抓取、STM32 机械臂、bootloader 进不去程序。含协议速查、三款控制器差异、自动探测、动作序列与故障排查。
 ---
 
 # KM1 机械臂 Python 控制
@@ -8,12 +8,12 @@ description: 用 Python + pyserial 驱动松甲机器人 KM1 / Yeahbot / YHKPZAR
 松甲机器人 **KM1** 六轴机械臂 · 协议族 **Yeahbot / YHKPZAR** · 6 路舵机 (0~5) · USB 虚拟串口 · 115200。
 固件为 Mixly 图形化生成，动作存于 W25Q64 闪存 (SPI)。
 
-> **支持 KM1 的三款控制器。** 三款的串口指令**完全兼容**——`#003P1500T0500!`、`$DGS:3!`、`{...}` 在任何一款上照发即可，协议、角度换算、返回格式全都一样。
-> **唯一差异是开串口时 `dtr` / `rts` 的两个取值**，见 [§3.1](#31-三款控制器命令完全一样只有-dtrrts-不同)。代码逻辑不需要按型号分支。
+> **支持 KM1 的三款控制器：ESP32 / Arduino / STM32。** 三款的串口指令**完全兼容**——`#003P1500T0500!`、`$DGS:3!`、`{...}` 在任何一款上照发即可，协议、角度换算、返回格式全都一样。
+> **唯一差异是开串口时 `dtr` / `rts` 的取值**：ESP32 = `F/F`、Arduino = 不设置、STM32 = `T/F`。详见 [§3.1](#31-三款控制器命令完全一样只有-dtrrts-不同)。代码逻辑不需要按型号分支。
 
 ## 零、三条铁律（先看这个，90% 的坑都在这）
 
-1. **`dtr` / `rts` 按控制器型号配**：这是三款控制器**唯一**的差异（§3.1）。配错只有两种表现——串口只吐 `waiting for download`（板子被按进下载模式），或串口能开但发指令毫无回应（板子被按在复位里）。不确定型号就跑 §3.3 的自动探测。
+1. **`dtr` / `rts` 按控制器型号配**：这是三款控制器**唯一**的差异——ESP32 `F/F`、Arduino 不设置、STM32 `T/F`（§3.1）。配错只有两种表现——串口只吐 `waiting for download`（进了下载模式），或串口能开但发指令毫无回应（ESP32 被按在复位里 / STM32 停在 bootloader 里）。不确定型号就跑 §3.3 的自动探测。
 2. **结束符不能错**：命令/动作模式以 `!` 结尾，批量模式以 `}` 结尾，存储模式以 `>` 结尾。少一个符号 = 没发。
 3. **动手前先 `$DST!`**：固件上电会自动播放默认动作组，不停掉的话你发的单舵机指令会被它抢回中位。
 
@@ -29,7 +29,7 @@ description: 用 Python + pyserial 驱动松甲机器人 KM1 / Yeahbot / YHKPZAR
 
 | 项目 | 规格 |
 |---|---|
-| 主控 | ESP32-S3（以控制器实物为准，三款差异见 §3.1） |
+| 主控 | 三款控制器：ESP32 / Arduino / STM32（指令完全兼容，差异见 §3.1） |
 | 舵机 | 6 个（编号 `000`~`005`） |
 | PWM 范围 | 500 ~ 2500（微秒） |
 | 中位 90° | PWM = 1500 |
@@ -56,35 +56,80 @@ def pwm_to_angle(pwm: int) -> int:
 
 ### 3.1 三款控制器：命令完全一样，只有 DTR/RTS 不同
 
-松甲机器人 KM1 有三款控制器在流通。**三者串口指令 100% 兼容**：协议前缀、零填充格式、返回数据、角度换算全部一致，同一份控制代码可以原样跑在三款上。**唯一要改的是开串口时 `dtr` / `rts` 两个布尔值。**
+松甲机器人 KM1 有三款控制器：**ESP32 / Arduino / STM32**。三者串口指令 100% 兼容——协议前缀、零填充格式、返回数据、角度换算全部一致，同一份控制代码可以原样跑在三款上。**唯一要改的是开串口时 `dtr` / `rts` 的取值。**
 
-| # | 控制器型号 | 串口芯片 | `dtr` | `rts` | 备注 |
+| # | 控制器 | 串口芯片 | `dtr` | `rts` | 为什么这么配 |
 |---|---|---|---|---|---|
-| 1 | （待补） | （待补） | （待补） | （待补） | |
-| 2 | （待补） | （待补） | （待补） | （待补） | |
-| 3 | （待补） | （待补） | （待补） | （待补） | |
+| 1 | ESP32 单片机控制器 | ESP32-S3 原生 USB CDC | `False` | `False` | 这两个信号会触发芯片进下载模式，必须禁用，否则串口只吐 `waiting for download` |
+| 2 | Arduino 单片机控制器 | 板载 USB 转串口（ATmega16U2 / CH340） | **不设置** | **不设置** | 自动复位本来就要靠 DTR 脉冲，板子自己会处理；代码里**不要**给这两个字段赋值，保持库默认 |
+| 3 | STM32 单片机控制器 | CH340X | `True` | `False` | DTR# 接 BOOT0、RTS# 经二极管接 RESET，见下方接线 |
 
-> 表内型号与配置待实测确认；**型号不明时直接用 §3.3 的自动探测**，不必先查表。
+**STM32 那款的接线（决定了这两个值）**
 
-配错的两种表现，正好可以反推是哪类问题：
+```
+CH340X                              STM32
+  DTR#(pin6) ───────────────────►  BOOT0  ── R33 4.7K ── GND
+  RTS#(pin4) ──► D8(1N5819WS) ──►  RESET        （二极管阴极朝 RESET）
+  TXD (pin8) ───────────────────►  PA10 (RX1)
+  RXD (pin9) ───────────────────►  PA9  (TX1)
+```
 
-| 表现 | 含义 | 处理 |
+- `DTR#` 低有效：**`dtr=True` → DTR# 拉低 → BOOT0 = 0 → 复位后跑用户程序**；`dtr=False` → DTR# 高 → BOOT0 = 1 → 复位后进 ISP bootloader
+- `RTS#` 低有效，经 1N5819WS 把 RESET 拉低：**`rts=True` → MCU 被按在复位里，不跑程序**
+
+所以正常运行必须是 **`dtr=True, rts=False`**。STM32 那款"串口能开、发指令全无回应"，八成就是 `dtr` 没给 `True`，板子停在 bootloader 里。
+
+> **BOOT0 只在复位那一刻采样。** 改了 `dtr` 之后必须复位一次才生效——用 §3.2 的 `reset_stm32()`，光改属性不复位是白改。
+
+**进 ISP 烧录**：`dtr=False`（BOOT0=1）→ `rts=True` 拉低复位 → 释放 `rts`；烧完把 `dtr` 拉回 `True` 再复位一次，才回到用户程序。
+
+配错的表现，正好可以反推是哪一款、错在哪：
+
+| 表现 | 说明 | 处理 |
 |---|---|---|
-| 串口只吐 `waiting for download` | 板子被 DTR/RTS 按进了**下载模式**，固件没跑 | 换一组 `dtr`/`rts`，再重新插拔 USB |
-| 串口能开、发指令零回应 | 板子被按在**复位**里，或结束符不对 | 先换 `dtr`/`rts`，再查结束符 |
+| 串口只吐 `waiting for download` | ESP32 那款被按进了**下载模式**，固件没跑 | `dtr=False, rts=False`，再重新插拔 USB |
+| 串口能开、发指令零回应（ESP32） | 被 `rts=True` 按在**复位**里，或结束符不对 | `rts=False`，再查结束符 |
+| 串口能开、发指令零回应（STM32） | `dtr` 不是 `True`，板子停在 **bootloader** | 改 `dtr=True` 并 `reset_stm32()` 复位 |
 
-### 3.2 开串口模板
+### 3.2 开串口模板（三款各抄一行）
 
 ```python
+import time
 import serial
 
-ser = serial.Serial()
-ser.port = 'COM3'          # Windows: 设备管理器里看；Linux: /dev/ttyUSB0 或 /dev/ttyACM0
-ser.baudrate = 115200
-ser.dtr = False            # ← 三款控制器只有这两个值不同，按 §3.1 或 §3.3 确定
-ser.rts = False
-ser.timeout = 0.1
-ser.open()
+# 三款控制器的唯一差异，选一行
+ESP32   = {'dtr': False, 'rts': False}   # 必须禁用，否则进下载模式
+ARDUINO = None                           # 不配置：别给 dtr/rts 赋值，保持库默认
+STM32   = {'dtr': True,  'rts': False}   # BOOT0=0 跑用户程序，且不拉 RESET
+
+
+def open_port(port: str, cfg: dict | None, baud: int = 115200):
+    """cfg 传上面三个常量之一；Arduino 那份传 None 表示保持默认"""
+    ser = serial.Serial()
+    ser.port = port            # Windows: COM3；Linux: /dev/ttyUSB0 或 /dev/ttyACM0
+    ser.baudrate = baud
+    ser.timeout = 0.1
+    if cfg is not None:
+        # 一定要在 open() 之前设：open 的瞬间默认电平已经作用到板子上了
+        ser.dtr = cfg['dtr']
+        ser.rts = cfg['rts']
+    ser.open()
+    print(f'[OK] {port} @ {baud}  {cfg or "dtr/rts 保持默认"}')
+    return ser
+
+
+def reset_stm32(ser):
+    """让新的 BOOT0 电平真正生效——BOOT0 只在复位时采样"""
+    ser.dtr = True       # BOOT0 = 0
+    ser.rts = True       # RESET 拉低
+    time.sleep(0.1)
+    ser.rts = False      # 释放复位，MCU 开始跑用户程序
+    time.sleep(0.5)
+
+
+if __name__ == '__main__':
+    ser = open_port('COM3', STM32)
+    reset_stm32(ser)     # 换过 dtr 就必须复位一次，否则改了个寂寞
 ```
 
 ### 3.3 型号不确定时的自动探测
@@ -95,7 +140,8 @@ ser.open()
 import time
 import serial
 
-CANDIDATES = [(False, False), (True, True), (False, True), (True, False)]
+# 按常见程度排序：ESP32 → STM32 → 默认 → 兜底
+CANDIDATES = [(False, False), (True, False), (True, True), (False, True)]
 
 
 def open_arm(port: str, baud: int = 115200):
@@ -135,15 +181,18 @@ if __name__ == '__main__':
     ser.close()
 ```
 
-探测到的组合建议写进配置文件缓存（同一台机器下次直接用），省掉每次 3 秒的试探。
+探测到的组合建议写进配置缓存（同一台机器下次直接用），省掉每次几秒的试探。
+
+**STM32 的坑**：如果前一组试探把板子留在了 bootloader（BOOT0 在上次复位时是 1），那么即使这一组 `dtr=True` 是对的，**不复位也不会生效**——MCU 还在 bootloader 里傻等。所以命中 `(True, False)` 后补一次 `reset_stm32(ser)` 再发指令更稳。
 
 ### 3.4 常见错误
 
 | 现象 | 原因 | 解决 |
 |---|---|---|
 | `SerialException: could not open port` | 端口被占用 | 关掉其他串口软件/上一个没退出的脚本 |
-| 只输出 `waiting for download` | DTR/RTS 让板子进了下载模式 | 换一组 `dtr`/`rts`，然后**重新插拔 USB** |
-| 发指令无响应 | 结束符不对 / `dtr`/`rts` 不对 | 先查是否以 `!` 结尾（批量是 `}`），再跑 §3.3 |
+| 只输出 `waiting for download` | ESP32 那款被 DTR/RTS 按进了下载模式 | 改 `dtr=False, rts=False`，然后**重新插拔 USB** |
+| 发指令无响应（ESP32） | 结束符不对 / 板子还在复位 | 先查是否以 `!` 结尾（批量是 `}`），再把 `rts` 置 `False` |
+| 发指令无响应（STM32） | `dtr` 没给 `True`，板子停在 bootloader | 改 `dtr=True` 后调 `reset_stm32()` 复位一次 |
 | 端口找不到 | 驱动未装 | 按串口芯片装 CH340 / CP210x 驱动 |
 
 ## 四、协议详解
@@ -220,7 +269,8 @@ class RobotArm:
     """KM1 机械臂控制（Yeahbot/YHKPZAR 协议）"""
 
     def __init__(self, port: str, baud: int = 115200, dtr: bool = False, rts: bool = False):
-        # dtr/rts 是三款控制器唯一的差异，按 §3.1 或 §3.3 的结果传进来
+        # dtr/rts 是三款控制器唯一的差异：ESP32 = (False, False)、STM32 = (True, False)
+        # Arduino 那款请改用 §3.2 的 open_port(port, None)，别传这两个参数
         self.ser = serial.Serial()
         self.ser.port = port
         self.ser.baudrate = baud
@@ -369,9 +419,10 @@ def find_arm_port():
 | 症状 | 排查顺序 |
 |---|---|
 | **舵机不动** | ① 是否先发了 `$DST!` ② PWM 是否在 500~2500 ③ 索引是否 0~5 ④ `time` 是否 ≥300ms |
-| **乱码 / 无响应** | ① 波特率是否 115200 ② 结束符是否 `!`/`}`/`>` ③ 连上后先发 `$RST!` 重启 |
+| **乱码 / 无响应** | ① 波特率是否 115200 ② 结束符是否 `!`/`}`/`>` ③ `dtr`/`rts` 是否按型号配（§3.1）④ 连上后先发 `$RST!` 重启 |
 | **串口打不开** | 列端口确认设备在：`for p in serial.tools.list_ports.comports(): print(p.device, p.description)` |
-| **进下载模式** | 日志出现 `ESP-ROM:esp32s3... waiting for download` → 换一组 `dtr`/`rts`（§3.1，或直接跑 §3.3 探测）+ 重新插拔 USB |
+| **进下载模式** | 日志出现 `ESP-ROM:esp32s3... waiting for download` → ESP32 那款改 `dtr=False, rts=False` + 重新插拔 USB |
+| **STM32 那款装死** | `dtr=True` + `reset_stm32()` 复位一次；仍不动就查 BOOT0 电平（应为 0V） |
 | **动作被打断** | 上电默认动作组在跑 → `$DST!` 后再发新指令 |
 
 ## 十、协议速查 + 舵机映射
