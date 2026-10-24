@@ -1,0 +1,449 @@
+# 机械臂 Python 控制编程指南
+
+## 基于 Yeahbot / YHKPZAR 协议 (ESP32-S3, 6 舵机)
+
+---
+
+## 1. 硬件概览
+
+| 项目 | 规格 |
+|---|---|
+| 主控芯片 | ESP32-S3 |
+| 舵机数量 | 6 个 (编号 0~5) |
+| 舵机控制方式 | PWM (脉宽调制) |
+| PWM 范围 | 500 ~ 2500 (单位: 微秒) |
+| 中位 (90°) | PWM = 1500 |
+| 通信接口 | USB 虚拟串口 (USB CDC) |
+| 默认波特率 | 115200 |
+| 固件类型 | Arduino (Mixly 图形化生成) |
+| 动作存储 | W25Q64 闪存芯片 (SPI) |
+
+### 舵机角度与 PWM 换算
+
+```
+PWM = 500  →  0°
+PWM = 1500 → 90°  (中位)
+PWM = 2500 → 180°
+
+角度 → PWM:  PWM = 500 + 角度 × (2000 ÷ 180)
+PWM → 角度:  角度 = (PWM - 500) × 180 ÷ 2000
+```
+
+Python 实现:
+
+```python
+def angle_to_pwm(angle: int) -> int:
+    """将角度(0-180)转换为PWM值(500-2500)"""
+    return round(500 + angle * 2000 / 180)
+
+def pwm_to_angle(pwm: int) -> int:
+    """将PWM值(500-2500)转换为角度(0-180)"""
+    return round((pwm - 500) * 180 / 2000)
+```
+
+---
+
+## 2. 串口连接（最关键的一步）
+
+**⚠️ 必须禁用 DTR 和 RTS 信号线。** 否则 ESP32-S3 上电时会进入下载模式（表现为串口只输出 `waiting for download`），不会运行固件。
+
+### 正确连接代码
+
+```python
+import serial
+
+ser = serial.Serial()
+ser.port = 'COM3'          # Windows 端口，在设备管理器中查看
+ser.baudrate = 115200
+ser.dtr = False            # 必须禁用！
+ser.rts = False            # 必须禁用！
+ser.timeout = 0.1          # 读取超时 100ms
+ser.open()
+
+# 验证连接
+print(f'已连接: {ser.port} @ {ser.baudrate}')
+```
+
+### 常见错误
+
+| 现象 | 原因 | 解决 |
+|---|---|---|
+| `serial.serialutil.SerialException: could not open port` | 端口被占用 | 关闭其他串口软件 |
+| 只输出 `waiting for download` | DTR/RTS 触发了下载模式 | 设置 `dtr=False, rts=False` |
+| 发指令无响应 | 指令格式错误 | 检查指令是否以 `!` 结尾 |
+| 端口找不到 | 驱动未安装 | 安装 CH340/CP210x 驱动 |
+
+---
+
+## 3. 通信协议详解
+
+固件通过 USB 串口接收指令，每条指令以特定字符开头、以 `!` 或 `}` 或 `>` 结尾。
+
+### 3.1 模式前缀
+
+| 首字符 | 模式 | 结束符 | 用途 |
+|---|---|---|---|
+| `$` | 命令模式 | `!` | 执行动作组、控制逻辑 |
+| `#` | 动作模式 | `!` | 控制单个舵机 |
+| `{` | 批量模式 | `}` | 同时控制多个舵机 |
+| `<` | 存储模式 | `>` | 保存动作到闪存 |
+
+### 3.2 命令列表 ($ 前缀)
+
+```
+$RST!                 重启 ESP32 控制板
+$DST!                 停止所有正在执行的动作
+$DST:延时!            延时指定时间(毫秒), 例: $DST:1000!
+$DGS:组号!            执行单组预设动作, 例: $DGS:3!
+$DGT:起始-结束,次数!   执行多组动作序列, 例: $DGT:1-5,1!
+$KMS:x,y,z,速度!      运动学模式移动 (需开启 KMS 初始化)
+```
+
+### 3.3 单舵机控制 (# 前缀)
+
+格式: `#索引P脉宽T时间!`
+
+| 字段 | 说明 | 范围 | 示例 |
+|---|---|---|---|
+| 索引 | 舵机编号 | `000` ~ `005` (6个) | `003` = 舵机3 |
+| 脉宽 | PWM 值 | `0500` ~ `2500` | `1500` = 中位 |
+| 时间 | 运动耗时(毫秒) | `0000` ~ `9999` | `0500` = 500ms |
+
+示例:
+
+```
+#003P1500T0500!    舵机3 → 中位(90°) → 500ms完成
+#001P2000T0800!    舵机1 → PWM 2000 → 800ms完成
+#000P0500T1000!    舵机0 → 0°极限 → 1000ms完成
+```
+
+### 3.4 批量控制 ({ 前缀)
+
+将多个 `#` 指令拼接在 `{` 和 `}` 之间:
+
+```
+{#000P1500T0500!#001P2000T0500!#002P1500T0500!}
+```
+
+含义: 同时控制舵机0到中位、舵机1到2000、舵机2到中位，全部 500ms 完成。
+
+### 3.5 串口返回数据格式
+
+固件执行指令后会通过串口返回信息:
+
+```
+$DST!                      ← 发送的指令
+#255PDST!                  ← 执行回显(停止动作)
+
+$DGS:3!                    ← 发送的指令
+{G0003#000P1500T1800!...}  ← 执行的动作组详情
+
+$DGT:10-19,1!              ← 发送的指令
+{G0010#000P1500T1500!...}  ← 第一组
+{G0011#000P1500T1500!...}  ← 第二组
+...
+@GroupDone!                 ← 全部动作执行完毕
+```
+
+---
+
+## 4. 完整 Python 控制程序
+
+### 4.1 基础版：串口通信 + 指令发送
+
+```python
+import serial
+import time
+
+class RobotArm:
+    """机械臂控制类"""
+
+    def __init__(self, port: str, baud: int = 115200):
+        self.ser = serial.Serial()
+        self.ser.port = port
+        self.ser.baudrate = baud
+        self.ser.dtr = False
+        self.ser.rts = False
+        self.ser.timeout = 0.1
+        self.ser.open()
+        print(f'[OK] 已连接 {port} @ {baud}')
+
+    def close(self):
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+            print('[OK] 已断开')
+
+    def send(self, cmd: str):
+        """发送单条指令"""
+        if not cmd.endswith('!'):
+            cmd += '!'
+        self.ser.write((cmd + '\n').encode('utf-8'))
+        print(f'[TX] {cmd}')
+
+    def wait_response(self, timeout: float = 2.0) -> list:
+        """读取返回数据"""
+        lines = []
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if self.ser.in_waiting:
+                data = self.ser.read(self.ser.in_waiting)
+                for line in data.decode('utf-8', errors='replace').split('\n'):
+                    line = line.strip()
+                    if line:
+                        lines.append(line)
+            time.sleep(0.05)
+        return lines
+
+    def set_servo(self, index: int, pwm: int, duration: int = 500):
+        """控制单个舵机"""
+        cmd = f'#{index:03d}P{pwm:04d}T{duration:04d}!'
+        self.send(cmd)
+
+    def set_all_servos(self, pwms: list[int], duration: int = 500):
+        """同时控制多个舵机"""
+        cmds = [f'#{i:03d}P{pwms[i]:04d}T{duration:04d}!' for i in range(len(pwms))]
+        batch = '{' + ''.join(cmds) + '}'
+        self.send(batch)
+
+    def exec_group(self, group_id: int):
+        """执行预设动作组"""
+        self.send(f'$DGS:{group_id}!')
+
+    def stop(self):
+        """停止所有动作"""
+        self.send('$DST!')
+
+    def home(self):
+        """回到待机位置 (所有舵机 90° 中位)"""
+        self.set_all_servos([1500] * 6)
+
+
+# ===== 使用示例 =====
+if __name__ == '__main__':
+    arm = RobotArm('COM7')
+
+    # 1. 停止默认动作
+    arm.stop()
+    time.sleep(1)
+
+    # 2. 回到待机位置
+    arm.home()
+    time.sleep(1)
+
+    # 3. 执行预设动作组
+    arm.exec_group(3)
+    time.sleep(2)
+
+    # 4. 控制单个舵机到 135°
+    angle = 135
+    pwm = round(500 + angle * 2000 / 180)
+    arm.set_servo(3, pwm, 500)
+    time.sleep(1)
+
+    # 5. 同时控制多个舵机
+    arm.set_all_servos([1500, 2000, 1500, 1000, 1500, 1800], 800)
+    time.sleep(1)
+
+    # 6. 停止
+    arm.stop()
+
+    arm.close()
+```
+
+### 4.2 高级版：带响应读取和动作序列
+
+```python
+import serial
+import time
+import threading
+
+class RobotArmPro:
+    """高级机械臂控制 (带后台读取线程)"""
+
+    def __init__(self, port: str, baud: int = 115200):
+        self.ser = serial.Serial()
+        self.ser.port = port
+        self.ser.baudrate = baud
+        self.ser.dtr = False
+        self.ser.rts = False
+        self.ser.timeout = 0.05
+        self.ser.open()
+
+        self._running = True
+        self.responses = []
+        self._thread = threading.Thread(target=self._reader, daemon=True)
+        self._thread.start()
+
+    def _reader(self):
+        while self._running:
+            try:
+                if self.ser.in_waiting:
+                    data = self.ser.read(self.ser.in_waiting).decode(errors='replace')
+                    for line in data.split('\n'):
+                        line = line.strip()
+                        if line:
+                            self.responses.append(line)
+            except:
+                pass
+            time.sleep(0.05)
+
+    def send(self, cmd: str):
+        self.ser.write((cmd + '\n').encode())
+        print(f'[TX] {cmd}')
+
+    def get_responses(self) -> list:
+        """获取并清空响应缓冲区"""
+        out = list(self.responses)
+        self.responses.clear()
+        return out
+
+    def close(self):
+        self._running = False
+        if self.ser.is_open:
+            self.ser.close()
+
+    def play_sequence(self, actions: list[dict]):
+        """
+        执行动作序列
+
+        actions = [
+            {'type': 'servo', 'index': 3, 'pwm': 1500, 'time': 500},
+            {'type': 'group', 'id': 3},
+            {'type': 'home'},
+            {'type': 'delay', 'ms': 1000},
+            {'type': 'all', 'pwms': [1500]*6, 'time': 500},
+        ]
+        """
+        for action in actions:
+            t = action.get('type', '')
+            if t == 'servo':
+                self.send(f'#{action["index"]:03d}P{action["pwm"]:04d}T{action["time"]:04d}!')
+            elif t == 'group':
+                self.send(f'$DGS:{action["id"]}!')
+            elif t == 'home':
+                self.send('{' + ''.join(
+                    f'#{i:03d}P1500T0500!' for i in range(6)
+                ) + '}')
+            elif t == 'delay':
+                time.sleep(action['ms'] / 1000)
+            elif t == 'all':
+                cmds = [f'#{i:03d}P{action["pwms"][i]:04d}T{action["time"]:04d}!' for i in range(len(action['pwms']))]
+                self.send('{' + ''.join(cmds) + '}')
+            elif t == 'stop':
+                self.send('$DST!')
+            time.sleep(0.2)
+```
+
+---
+
+## 5. 预设动作组查询
+
+通过 `$DGT:10-19,1!` 可以触发固件返回其存储的所有动作组数据。执行后串口会逐一输出每个动作组的 PWM 配置:
+
+```
+{G0010#000P1500T1500!#001P2000T1500!...}    ← 组 10
+{G0011#000P1500T1500!#001P2000T1500!...}    ← 组 11
+...
+@GroupDone!                                   ← 完成
+```
+
+每组包含 6 个舵机的目标 PWM 和运动时间，可用于了解机械臂的能力范围。
+
+---
+
+
+## 5. 跨平台适配 (Windows / Linux)
+
+### 5.1 操作系统差异
+
+| 项目 | Windows | Linux |
+|---|---|---|
+| 串口路径 | COM1 ~ COM256 | /dev/ttyUSB0, /dev/ttyACM0 |
+| 串口驱动 | 需安装 CH340/CP210x 驱动 | 内核自带 (CDC_ACM, CH341) |
+| 权限 | 管理员或普通用户均可 | 需加入 dialout 组 |
+| Python 串口库 | pyserial (pip install pyserial) | 同上 |
+
+### 5.2 Linux 下权限设置
+
+`ash
+sudo usermod -a -G dialout 
+newgrp dialout
+`
+
+### 5.3 跨平台端口自动检测
+
+`python
+import serial
+import serial.tools.list_ports
+
+def find_arm_port():
+    for port in serial.tools.list_ports.comports():
+        if port.vid in (0x1A86, 0x10C4, 0x0403, 0x2E88):
+            return port.device
+    import glob
+    for pattern in ['/dev/ttyUSB*', '/dev/ttyACM*', 'COM*']:
+        for path in sorted(glob.glob(pattern)):
+            return path
+    return None
+`
+
+### 5.4 跨平台要点
+
+Windows 和 Linux 只需改两处: (1) 端口号 COM3 vs /dev/ttyUSB0, (2) 权限驱动。其余代码（DTR/RTS 禁用、指令协议、角度换算）完全一致。
+## 6. 故障排查
+
+### 6.1 串口打不开
+```python
+# 列出所有可用串口
+import serial.tools.list_ports
+ports = serial.tools.list_ports.comports()
+for p in ports:
+    print(f'{p.device}: {p.description}')
+```
+
+### 6.2 舵机不动
+- 确保先发 `$DST!` 停止正在运行的默认动作
+- 检查 PWM 值是否在 500~2500 范围内
+- 检查舵机编号是否正确 (0~5)
+- 运动时间不宜过短 (建议 ≥ 300ms)
+
+### 6.3 乱码或者指令无响应
+- 检查波特率是否为 115200
+- 检查指令是否以 `!` 结尾
+- 首次连接后用 `$RST!` 重启控制板
+
+### 6.4 进入下载模式
+```
+ESP-ROM:esp32s3-20210327
+rst:0x1 (POWERON),boot:0x23 (DOWNLOAD(USB/UART0))
+waiting for download
+```
+
+**原因**: 串口打开时 DTR/RTS 信号触发 ESP32 进入下载模式。
+**解决**: 设置 `ser.dtr = False` 和 `ser.rts = False`，然后重新插拔 USB。
+
+---
+
+## 7. 协议速查表
+
+```
+┌─────────────┬──────────────────────────────┬──────────────────────────────┐
+│  功能       │  指令示例                    │  说明                        │
+├─────────────┼──────────────────────────────┼──────────────────────────────┤
+│  停止       │  $DST!                       │  立即停止所有动作            │
+│  单组动作   │  $DGS:3!                     │  执行第3组预设动作           │
+│  多组动作   │  $DGT:1-5,1!                 │  执行1~5组，各1次            │
+│  单舵机     │  #003P1500T0500!             │  3号舵机→1500→500ms         │
+│  批量       │  {#000P...!#001P...!}        │  同时发多个舵机指令          │
+│  保存       │  <位置数据>                  │  存储动作到闪存              │
+│  重启       │  $RST!                       │  重启 ESP32                 │
+└─────────────┴──────────────────────────────┴──────────────────────────────┘
+
+舵机编号映射:
+  舵机 0: 底座旋转 (左右)
+  舵机 1: 大臂 (前后)
+  舵机 2: 小臂 (上下)
+  舵机 3: 腕部 (俯仰)
+  舵机 4: 腕部旋转 (左右)
+  舵机 5: 夹爪 (开合)
+```

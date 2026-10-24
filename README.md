@@ -10,8 +10,12 @@ AI-SKILL/
 ├── LICENSE                        # MIT License
 ├── code-review/
 │   └── SKILL.md                   # 多智能体四视角代码审查
-└── conventional-commit/
-    └── SKILL.md                   # Conventional Commits 提交规范
+├── conventional-commit/
+│   └── SKILL.md                   # Conventional Commits 提交规范
+└── km1-robot-arm/
+    ├── SKILL.md                   # KM1 六轴机械臂 Python 控制
+    └── reference/
+        └── km1机械臂Python控制编程指南.txt   # 原始资料
 ```
 
 ## Skill 一览
@@ -20,6 +24,7 @@ AI-SKILL/
 |-------|------|--------------|
 | [code-review](#1-code-review多智能体四视角代码审查) | 四个"专家人格"并行审查代码，主智能体核实后输出可追溯的审查报告 | 较大改动完成后、提交前把关 |
 | [conventional-commit](#2-conventional-commit提交规范) | 编写符合 Conventional Commits 规范的 git 提交信息 | 提交代码、整理提交历史、定版本号 |
+| [km1-robot-arm](#3-km1-robot-armkm1-机械臂-python-控制) | KM1 / Yeahbot / YHKPZAR 六轴机械臂串口控制：协议速查、动作编排、故障排查 | 机械臂编程、舵机调试、协议查询 |
 
 ---
 
@@ -102,12 +107,50 @@ fix(protocol): LEN 超限判错并重同步, 防止吞帧
 
 ---
 
+## 3. km1-robot-arm：KM1 机械臂 Python 控制
+
+面向 **KM1 / Yeahbot / YHKPZAR** 协议族的六轴机械臂（ESP32-S3 主控 + 6 路舵机，USB 虚拟串口 115200）。把踩过的坑固化成"铁律 + 速查表"，不用每次对着原始文档重新推。
+
+### 三条铁律
+
+| # | 铁律 | 不遵守的后果 |
+|---|------|--------------|
+| 1 | 打开串口必须 `dtr=False, rts=False` | ESP32-S3 被拉进下载模式，只吐 `waiting for download`，固件根本没跑 |
+| 2 | 结束符不能错：命令/动作 `!`，批量 `}`，存储 `>` | 少一个符号 = 指令没发出去 |
+| 3 | 动手前先发 `$DST!` | 上电会自动播放默认动作组，你的单舵机指令被抢回中位 |
+
+### 协议速查
+
+```
+$DST!                 停止所有动作
+$DGS:3!               执行第 3 组预设动作
+$DGT:1-5,1!           执行 1~5 组，各 1 次
+#003P1500T0500!       3 号舵机 → PWM 1500 → 500ms 到位
+{#000P...!#001P...!}  同时控制多舵机
+$RST!                 重启控制板
+```
+
+舵机映射：0 底座旋转 / 1 大臂 / 2 小臂 / 3 腕部俯仰 / 4 腕部旋转 / 5 夹爪。角度换算：`PWM = 500 + 角度 × 2000/180`。
+
+### 收录内容
+
+- 硬件规格与角度/PWM 换算（含 Python 函数）
+- 连接铁律 + 常见错误对照表（端口占用、下载模式、无响应、缺驱动）
+- 指令协议详解：四种模式前缀、单舵机零填充格式、批量、返回数据格式
+- 可直接复用的 `RobotArm` 控制类与动作序列编排模板
+- 从固件 dump 预设动作组的方法（`$DGT:10-19,1!` → `@GroupDone!`）
+- Windows / Linux 差异与端口自动检测
+- 故障排查表 + 工程纪律（判定完成认 `@GroupDone!`，不要 `sleep` 猜）
+
+---
+
 ## 安装与使用
 
 1. 将 skill 文件夹（含 `SKILL.md`）复制到你的 AI 工具的 skills 目录，例如：
    - Trae：项目 `.trae/skills/` 或全局 skills 目录
    - Claude Code：`~/.claude/skills/`
-2. 无需额外配置，skill 会在匹配场景（代码审查、编写提交信息）自动触发，也可在对话中点名调用。
+   - WorkBuddy：`~/.workbuddy/skills/`（用户级）或 `<项目>/.workbuddy/skills/`（项目级）
+2. 无需额外配置，skill 会在匹配场景（代码审查、编写提交信息、机械臂控制/调试）自动触发，也可在对话中点名调用。
 
 ## License
 
