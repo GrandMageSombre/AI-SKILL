@@ -12,6 +12,10 @@ AI-SKILL/
 │   └── SKILL.md                   # 多智能体四视角代码审查
 ├── conventional-commit/
 │   └── SKILL.md                   # Conventional Commits 提交规范
+├── git-upload/
+│   ├── SKILL.md                   # 本地目录 → GitHub 全流程
+│   └── reference/
+│       └── push_via_api.py        # github.com 被墙时用 REST API 复刻提交
 └── km1-robot-arm/
     ├── SKILL.md                   # KM1 六轴机械臂 Python 控制
     └── reference/
@@ -25,6 +29,7 @@ AI-SKILL/
 | [code-review](#1-code-review多智能体四视角代码审查) | 四个"专家人格"并行审查代码，主智能体核实后输出可追溯的审查报告 | 较大改动完成后、提交前把关 |
 | [conventional-commit](#2-conventional-commit提交规范) | 编写符合 Conventional Commits 规范的 git 提交信息 | 提交代码、整理提交历史、定版本号 |
 | [km1-robot-arm](#3-km1-robot-armkm1-机械臂-python-控制) | 松甲机器人 KM1 六轴机械臂串口控制：PWM 版 / 总线版两版自检流程，三款控制器（ESP32/Arduino/STM32）命令全兼容、仅 DTR/RTS 不同 | 机械臂编程、首装接线自检、舵机调试、换控制器后跑不通 |
+| [git-upload](#4-git-upload本地目录--github) | 本地文件夹转 GitHub 仓库并推送：先查远端、接续历史、502/认证排查、无 gh 走 API | 上传到 GitHub、加入 git 管理、push 失败 |
 
 ---
 
@@ -165,13 +170,44 @@ $RST!                 重启控制板
 
 ---
 
+## 4. git-upload：本地目录 → GitHub
+
+把任意本地文件夹变成 GitHub 仓库并推上去。真正容易踩的不是 `git init`，而是**远端已经有东西**、**网络被墙**、**认证失效**这三种情况。
+
+### 四步流程
+
+| 步 | 做什么 | 关键判断 |
+|---|---|---|
+| 1 | 查远端是否已有同名仓库 | **先查再建**，别新建重名仓库 |
+| 2 | `init` + `.gitignore` + 提交 | 中文提交信息写文件再 `-F` |
+| 3 | 接远端 | 远端为空直接 push；已有提交先 `fetch` 再接续 |
+| 4 | push + 校验 | 502 / 认证 / 非快进各有对应处置 |
+
+### 远端已有提交时
+
+不要 force push，也不要拿本地新写的 README 覆盖远端那份。做法是：备份本地新增文件到仓库外 → `checkout -B main <remote-sha>` → 把文件拷回 → 补一个提交。历史保持线性，远端内容不丢。
+
+### push 报 502 怎么办
+
+`CONNECT tunnel failed, response 502` 说明代理拦了 `github.com:443`，而 `api.github.com` 通常还是通的。先重试几次（多数是间歇的）；仍不行就用 REST API 复刻提交——**tree、parent、作者与时间、message 全部照抄本地，GitHub 生成的 commit SHA 与本地完全相同**，不会造成远端分叉。
+
+脚本 [`reference/push_via_api.py`](./git-upload/reference/push_via_api.py) 支持 `--dry-run`：只建 blob / tree 并比对 SHA，不动分支。
+
+### 三条硬规矩
+
+- **push 返回码为 0 之后才更新跟踪引用**，否则 `git status` 会假装已同步，排查时多花一倍时间
+- 远端不是你本地 HEAD 的父提交时**拒绝硬推**，先按上面那节接续历史
+- token 不进日志、不进提交、不写进 skill 文件
+
+---
+
 ## 安装与使用
 
 1. 将 skill 文件夹（含 `SKILL.md`）复制到你的 AI 工具的 skills 目录，例如：
    - Trae：项目 `.trae/skills/` 或全局 skills 目录
    - Claude Code：`~/.claude/skills/`
    - WorkBuddy：`~/.workbuddy/skills/`（用户级）或 `<项目>/.workbuddy/skills/`（项目级）
-2. 无需额外配置，skill 会在匹配场景（代码审查、编写提交信息、机械臂控制/调试）自动触发，也可在对话中点名调用。
+2. 无需额外配置，skill 会在匹配场景（代码审查、编写提交信息、机械臂控制/调试、上传仓库）自动触发，也可在对话中点名调用。
 
 ## License
 
