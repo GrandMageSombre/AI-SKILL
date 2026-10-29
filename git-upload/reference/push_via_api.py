@@ -24,7 +24,8 @@ from datetime import datetime, timedelta, timezone
 # ---------------------------------------------------------------- git helpers
 
 def git(*args, binary=False):
-    r = subprocess.run(['git', *args], capture_output=True, timeout=180)
+    r = subprocess.run(['git', '-c', 'core.quotePath=false', *args],
+                       capture_output=True, timeout=180)
     if r.returncode != 0:
         raise SystemExit(f"git {' '.join(args)} 失败: {r.stderr.decode('utf-8', 'replace')[:300]}")
     return r.stdout if binary else r.stdout.decode('utf-8', 'replace')
@@ -79,6 +80,19 @@ def make_api(token):
     return api
 
 
+def sync_remote_ref(branch, sha):
+    """补写本地跟踪引用: 本机 git 写 refs/remotes 会静默失败"""
+    d = os.path.join('.git', 'refs', 'remotes', 'origin')
+    name = branch.replace('/', '_')
+    try:
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, name), 'w') as f:
+            f.write(sha + "\n")
+        print(f'[OK] 本地跟踪引用 origin/{branch} 已同步')
+    except OSError as e:
+        print(f'[warn] 本地跟踪引用写入失败（不影响远端）: {e}')
+
+
 # ---------------------------------------------------------------- main
 
 def main():
@@ -119,9 +133,18 @@ def main():
     if remote_sha == head:
         print('远端已经就是本地 HEAD，无需推送。')
         return
-    if remote_sha and remote_sha != (parents[0] if parents else None):
+    parent = parents[0] if parents else None
+    if remote_sha and remote_sha != parent:
+        is_ancestor = subprocess.run(
+            ['git', 'merge-base', '--is-ancestor', remote_sha, head]).returncode == 0
+        if is_ancestor:
+            n = git('rev-list', '--count', f'{remote_sha}..{head}').strip()
+            raise SystemExit(
+                f'本地积压 {n} 个未推送提交，本脚本一次只复刻 HEAD。\n'
+                '先重试 git push；仍被墙时按父→子顺序逐条复刻（每个提交跑一次），'
+                '不要 amend / rebase 改写历史。')
         raise SystemExit(
-            '远端分支不是本地 HEAD 的父提交，不能直接复刻（会产生分叉）。\n'
+            '远端分支既不是 HEAD 的父提交、也不是本地祖先，不能直接复刻（会产生分叉）。\n'
             '先按 SKILL §五 接续历史：fetch → checkout -B <branch> <remote-sha> → 补提交。')
 
     # ---- 比对文件，收集要传的 blob 与要删的项
@@ -163,7 +186,9 @@ def main():
         body['base_tree'] = remote_tree
     st, tree = api(f'/repos/{repo}/git/trees', 'POST', body)
     if st != 201:
-        raise SystemExit(f'建 tree 失败: {st} {tree}')
+        hint = ("\n提示: 422 not a valid blob 通常是「用了全量 tree 却没上传新 blob」，"
+                '应只传变更文件并使用 base_tree。') if st == 422 else ''
+        raise SystemExit(f'建 tree 失败: {st} {tree}{hint}')
     print(f'new tree: {tree["sha"]}  与本地一致: {tree["sha"] == head_tree}')
     if tree['sha'] != head_tree:
         raise SystemExit('tree 与本地不一致，停下（检查是否有 CRLF 转换或漏传文件）')
@@ -189,7 +214,13 @@ def main():
                   {'sha': commit['sha'], 'force': False})
     if st != 200:
         raise SystemExit(f'更新分支失败: {st} {res}')
-    print(f'[OK] {branch} -> {res["object"]["sha"]}')
+
+    # 回读确认（PATCH 成功只代表请求被接受）
+    st, ref = api(f'/repos/{repo}/git/ref/heads/{branch}')
+    if st != 200 or ref['object']['sha'] != head:
+        raise SystemExit(f'回读校验失败: 远端 {ref} != 本地 {head}')
+    print(f'[OK] {branch} -> {commit["sha"]}（已回读确认）')
+    sync_remote_ref(branch, head)
 
 
 if __name__ == '__main__':
